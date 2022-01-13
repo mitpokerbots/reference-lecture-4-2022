@@ -12,6 +12,7 @@ import socket
 import eval7
 import sys
 import os
+import random
 
 sys.path.append(os.getcwd())
 from config import *
@@ -35,6 +36,7 @@ STATUS = lambda players: ''.join([PVALUE(p.name, p.bankroll) for p in players])
 # T#.### the player's game clock
 # P# the player's index
 # H**,** the player's hand in common format
+# U**,** the player's updated hand in common format
 # F a fold action in the round history
 # C a call action in the round history
 # K a check action in the round history
@@ -51,6 +53,18 @@ STATUS = lambda players: ''.join([PVALUE(p.name, p.bankroll) for p in players])
 # Action history is sent once, including the player's actions
 
 
+def swap(player_card_index, hands, deck):
+    '''
+    Swaps player's card with a card from the deck.
+    '''
+    card_index = player_card_index % len(hands)
+    player_index = player_card_index // len(hands)
+    random_card = deck.deal(1)
+    deck.cards.append(hands[player_index][card_index])
+    hands[player_index][card_index] = random_card[0]
+    return hands, deck
+
+
 class RoundState(namedtuple('_RoundState', ['button', 'street', 'pips', 'stacks', 'hands', 'deck', 'previous_state'])):
     '''
     Encodes the game tree for one round of poker.
@@ -60,8 +74,8 @@ class RoundState(namedtuple('_RoundState', ['button', 'street', 'pips', 'stacks'
         '''
         Compares the players' hands and computes payoffs.
         '''
-        score0 = eval7.evaluate(self.deck.peek(5) + self.hands[0])
-        score1 = eval7.evaluate(self.deck.peek(5) + self.hands[1])
+        score0 = eval7.evaluate(self.deck[0] + self.hands[0])
+        score1 = eval7.evaluate(self.deck[0] + self.hands[1])
         if score0 > score1:
             delta = STARTING_STACK - self.stacks[1]
         elif score0 < score1:
@@ -94,7 +108,7 @@ class RoundState(namedtuple('_RoundState', ['button', 'street', 'pips', 'stacks'
         max_contribution = min(self.stacks[active], self.stacks[1-active] + continue_cost)
         min_contribution = min(max_contribution, continue_cost + max(continue_cost, BIG_BLIND))
         return (self.pips[active] + min_contribution, self.pips[active] + max_contribution)
-
+            
     def proceed_street(self):
         '''
         Resets the players' pips and advances the game tree to the next round of betting.
@@ -102,7 +116,15 @@ class RoundState(namedtuple('_RoundState', ['button', 'street', 'pips', 'stacks'
         if self.street == 5:
             return self.showdown()
         new_street = 3 if self.street == 0 else self.street + 1
-        return RoundState(1, new_street, [0, 0], self.stacks, self.hands, self.deck, self)
+        new_hands = self.hands.copy()
+        new_deck = eval7.Deck()
+        new_deck.cards = self.deck[1].cards.copy()
+        if self.street == 0 or self.street == 3:
+            for i in range(sum([len(hand) for hand in self.hands])):
+                if random.random() < (FLOP_PERCENT if self.street == 0 else TURN_PERCENT):
+                    new_hands, new_deck = swap(i, new_hands, new_deck)
+        board = self.deck[0] + new_deck.deal(3 if self.street == 0 else 1)
+        return RoundState(1, new_street, [0, 0], self.stacks, new_hands, (board, new_deck), self)
 
     def proceed(self, action):
         '''
@@ -168,6 +190,7 @@ class Player():
         except FileNotFoundError:
             print(self.name, 'commands.json not found - check PLAYER_PATH')
         except json.decoder.JSONDecodeError:
+            print(self.path)
             print(self.name, 'commands.json misformatted')
         if self.commands is not None and len(self.commands['build']) > 0:
             try:
@@ -322,13 +345,18 @@ class Game():
             self.player_messages[0] = ['T0.', 'P0', 'H' + CCARDS(round_state.hands[0])]
             self.player_messages[1] = ['T0.', 'P1', 'H' + CCARDS(round_state.hands[1])]
         elif round_state.street > 0 and round_state.button == 1:
-            board = round_state.deck.peek(round_state.street)
+            board = round_state.deck[0]
             self.log.append(STREET_NAMES[round_state.street - 3] + ' ' + PCARDS(board) +
                             PVALUE(players[0].name, STARTING_STACK-round_state.stacks[0]) +
                             PVALUE(players[1].name, STARTING_STACK-round_state.stacks[1]))
             compressed_board = 'B' + CCARDS(board)
             self.player_messages[0].append(compressed_board)
             self.player_messages[1].append(compressed_board)
+            if round_state.street < 5:
+                self.log.append("{}'s hand: {}".format(players[0].name, PCARDS(round_state.hands[0])))
+                self.log.append("{}'s hand: {}".format(players[1].name, PCARDS(round_state.hands[1])))
+                self.player_messages[0].append('U' + CCARDS(round_state.hands[0]))
+                self.player_messages[1].append('U' + CCARDS(round_state.hands[1]))
 
     def log_action(self, name, action, bet_override):
         '''
@@ -371,7 +399,8 @@ class Game():
         '''
         deck = eval7.Deck()
         deck.shuffle()
-        hands = [deck.deal(2), deck.deal(2)]
+        deck = ([], deck)
+        hands = [deck[1].deal(2), deck[1].deal(2)]
         pips = [SMALL_BLIND, BIG_BLIND]
         stacks = [STARTING_STACK - SMALL_BLIND, STARTING_STACK - BIG_BLIND]
         round_state = RoundState(0, 0, pips, stacks, hands, deck, None)
@@ -421,6 +450,4 @@ class Game():
 
 
 if __name__ == '__main__':
-    start_time = time.time()
     Game().run()
-    print("--- %s seconds ---" % (time.time() - start_time))
